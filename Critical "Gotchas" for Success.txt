@@ -1,0 +1,15 @@
+Macro LEF/LIB: Ensure sky130_sram_1rw1r_32x2048_8 LEF (Tech LEF) and LIB (Timing) are in the PDK variant (sky130A/libs.tech/openlane/...). OpenLane 2024.09+ includes them by default.
+Power Rings (VDD/VSS): Macros require explicit power rings (metal4/metal5) connecting vdd/vss pins inside the macro placement rows. OpenLane init_fp does this if MACRO_PLACEMENT_CFG is correct and FP_PDN_MODE is set.
+ECC Bit Width Mismatch (The Big One):
+The RTL above instantiates 32-bit macros.
+Your Spec requires 39-bit storage (SECDED).
+Sky130 has NO 39-bit 1RW1R macro.
+To get GDSII with ECC: You must instantiate 16 Macros (2 per bank).
+Bank i: macro_data[i] (32-bit), macro_ecc[i] (32-bit, use lower 7 bits).
+Modify GEN_MACROS generate block to create 16 instances.
+Update macro.cfg for 16 placements.
+Connect wdata_ecc[31:0] -> macro_data.din, wdata_ecc[38:32] -> macro_ecc.din[6:0].
+Mux macro_data.dout + macro_ecc.dout -> Decoder.
+Without this, your GDSII will be a 32-bit SRAM with dummy ECC outputs.
+Antenna Rules: Long wires on Macro DIN/ADDR pins during routing cause antenna violations. Add Antenna Diodes (sky130_fd_sc_hd__diode_2) on macro input pins via macro.cfg antenna_diodes property or post-route script.
+Clock Gating: Macros have CLK pins. High fanout (16 macros). CTS must handle this. Set CTS_BUF_DISTANCE appropriately.
