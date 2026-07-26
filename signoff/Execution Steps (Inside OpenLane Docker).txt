@@ -1,0 +1,17 @@
+# 1. Enter OpenLane Container
+cd OpenLane
+make mount  # Mounts your local designs/ into /openlane/designs
+
+# 2. Run Flow (Interactive or Batch)
+# Inside container:
+flow.tcl -design sram_64kb_1rw1r_ecc -init_design_config
+# OR run specific steps:
+flow.tcl -design sram_64kb_1rw1r_ecc -tag run1 -overwrite
+
+# Standard Steps:
+# 1. Synthesis (Yosys)          -> checks macro instantiation
+# 2. Floorplan (init_fp)        -> places macros per macro.cfg, IO pins per pin_order.cfg
+# 3. Placement (place)          -> places standard cells (ECC logic, Arbiter, AXI)
+# 4. CTS (clock_tree_synthesis) -> builds clock tree for 16 macros + logic
+# 5. Routing (route)            -> TritonRoute
+# 6. Signoff (Magic/Netgen)     -> DRC/LVS/PEX
