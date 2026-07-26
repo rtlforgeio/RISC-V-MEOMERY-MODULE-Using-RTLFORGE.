@@ -1,0 +1,165 @@
+# Architectural Plan: Dual-Port SRAM with AXI4-Lite and SECDED ECC
+
+## 1. Overview
+
+This document outlines the architectural design for a parameterized dual-port SRAM with AXI4-Lite slave interface and SECDED ECC protection. The SRAM will be configured for a RISC-V RV32I core, with Port A dedicated to instruction read-only access and Port B for data read/write access. The design prioritizes 1-cycle read latency.
+
+## 2. Parameters
+
+*   `DATA_WIDTH`: 32 bits (for RISC-V RV32I word size)
+*   `ADDR_WIDTH`: 16 bits (for 64KB memory size, `2^16 * 32 bits = 64KB`)
+*   `ECC_PARITY_BITS`: 7 bits (for SECDED ECC on 32-bit data)
+*   `MEM_DEPTH`: `2^ADDR_WIDTH`
+*   `TOTAL_DATA_WIDTH`: `DATA_WIDTH + ECC_PARITY_BITS` (32 + 7 = 39 bits)
+
+## 3. Core Interfaces
+
+### 3.1. AXI4-Lite Slave Interface
+
+The SRAM will expose an AXI4-Lite slave interface for configuration and data access (primarily for Port B). This interface will handle address, write data, write response, read address, and read data channels.
+
+*   **AW Channel**: `AWVALID`, `AWREADY`, `AWADDR`, `AWPROT`
+*   **W Channel**: `WVALID`, `WREADY`, `WDATA`, `WSTRB`
+*   **B Channel**: `BVALID`, `BREADY`, `BRESP`
+*   **AR Channel**: `ARVALID`, `ARREADY`, `ARADDR`, `ARPROT`
+*   **R Channel**: `RVALID`, `RREADY`, `RDATA`, `RRESP`
+
+### 3.2. Port A (Instruction Read-Only)
+
+*   `i_addr_A`: `ADDR_WIDTH` bits, input (instruction address)
+*   `i_en_A`: 1 bit, input (read enable for Port A)
+*   `o_rdata_A`: `DATA_WIDTH` bits, output (instruction data)
+*   `o_ecc_error_A`: 1 bit, output (ECC error detected on Port A read)
+
+### 3.3. Port B (Data Read/Write)
+
+*   `i_addr_B`: `ADDR_WIDTH` bits, input (data address)
+*   `i_we_B`: 1 bit, input (write enable for Port B)
+*   `i_en_B`: 1 bit, input (read enable for Port B)
+*   `i_wdata_B`: `DATA_WIDTH` bits, input (data to write)
+*   `o_rdata_B`: `DATA_WIDTH` bits, output (data read)
+*   `o_ecc_error_B`: 1 bit, output (ECC error detected on Port B read)
+
+## 4. Clock and Reset
+
+*   **Clock**: `clk` (single clock domain for the entire SRAM module)
+*   **Reset**: `rst_n` (active-low, synchronous reset)
+
+## 5. Memory Organization
+
+The internal memory will be an array of `TOTAL_DATA_WIDTH` bits, storing `DATA_WIDTH` bits of actual data and `ECC_PARITY_BITS` for SECDED ECC. The memory will be implemented using a SystemVerilog `logic` array, which synthesis tools will infer as block RAM or distributed RAM depending on target technology and size.
+
+`logic [TOTAL_DATA_WIDTH-1:0] mem [MEM_DEPTH-1:0];`
+
+## 6. SECDED ECC Implementation
+
+### 6.1. Encoding (Write Path)
+
+When data is written to the SRAM (via Port B or AXI4-Lite write), the `DATA_WIDTH` bits will be encoded with `ECC_PARITY_BITS` using a Hamming code generator. The generated parity bits will be stored alongside the data in the memory array.
+
+### 6.2. Decoding and Correction (Read Path)
+
+When data is read from the SRAM (Port A, Port B, or AXI4-Lite read), the `TOTAL_DATA_WIDTH` bits (data + parity) will be fed into an ECC decoder. The decoder will:
+
+1.  Detect single-bit errors and correct them.
+2.  Detect double-bit errors (uncorrectable).
+3.  Output the corrected `DATA_WIDTH` bits.
+4.  Assert an `ecc_error` signal if an uncorrectable error is detected.
+
+## 7. AXI4-Lite Slave FSM (Chain-of-Thought)
+
+The AXI4-Lite slave will operate as a simple state machine to handle read and write transactions. Given the 1-cycle read latency requirement for the SRAM, the AXI4-Lite interface will also aim for minimal latency.
+
+### States:
+
+*   **IDLE**: Default state, waiting for `AWVALID` or `ARVALID`.
+*   **W_ADDR**: `AWVALID` received. Latch `AWADDR`. Wait for `WVALID`.
+*   **W_DATA**: `WVALID` received. Latch `WDATA`, `WSTRB`. Perform write to SRAM. Transition to `W_RESP`.
+*   **W_RESP**: Assert `BVALID`. Wait for `BREADY`. Transition to `IDLE`.
+*   **R_ADDR**: `ARVALID` received. Latch `ARADDR`. Perform read from SRAM. Transition to `R_DATA`.
+*   **R_DATA**: Assert `RVALID`. Output `RDATA`, `RRESP`. Wait for `RREADY`. Transition to `IDLE`.
+
+### State Transitions:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    IDLE --> W_ADDR: AWVALID
+    IDLE --> R_ADDR: ARVALID
+    W_ADDR --> W_DATA: WVALID
+    W_DATA --> W_RESP: Write Complete
+    W_RESP --> IDLE: BREADY
+    R_ADDR --> R_DATA: Read Complete
+    R_DATA --> IDLE: RREADY
+
+    note right of IDLE: Waiting for AXI4-Lite requests
+    note right of W_ADDR: Latch write address
+    note right of W_DATA: Latch write data, perform SRAM write
+    note right of W_RESP: Send write response
+    note right of R_ADDR: Latch read address, perform SRAM read
+    note right of R_DATA: Send read data and response
+```
+
+### Dry Run Logic:
+
+**AXI4-Lite Write Transaction:**
+
+1.  **IDLE**: `AWVALID` goes high. FSM transitions to `W_ADDR`. `awready` asserted.
+2.  **W_ADDR**: `WVALID` goes high. FSM transitions to `W_DATA`. `wready` asserted. The `AWADDR` and `WDATA` are used to calculate ECC and write to the internal memory. `mem[awaddr_reg]` is updated.
+3.  **W_DATA**: Write operation completes (combinational for memory access). FSM transitions to `W_RESP`. `bvalid` asserted.
+4.  **W_RESP**: `BREADY` goes high. FSM transitions to `IDLE`. `bvalid` de-asserted.
+
+**AXI4-Lite Read Transaction:**
+
+1.  **IDLE**: `ARVALID` goes high. FSM transitions to `R_ADDR`. `arready` asserted.
+2.  **R_ADDR**: Read operation from `mem[araddr_reg]` is combinational. ECC decoding and correction are performed. FSM transitions to `R_DATA`. `rvalid` asserted. `RDATA` and `RRESP` (including ECC error status) are driven.
+3.  **R_DATA**: `RREADY` goes high. FSM transitions to `IDLE`. `rvalid` de-asserted.
+
+**Port A (Instruction Read):**
+
+*   `i_en_A` high and `i_addr_A` stable: `mem[i_addr_A]` is combinatorially accessed. ECC decoding and correction are performed. `o_rdata_A` and `o_ecc_error_A` are driven in the same cycle. This meets the 1-cycle read latency.
+
+**Port B (Data Read/Write):**
+
+*   **Read**: `i_en_B` high and `i_we_B` low and `i_addr_B` stable: `mem[i_addr_B]` is combinatorially accessed. ECC decoding and correction are performed. `o_rdata_B` and `o_ecc_error_B` are driven in the same cycle. This meets the 1-cycle read latency.
+*   **Write**: `i_en_B` high and `i_we_B` high and `i_addr_B`, `i_wdata_B` stable: ECC encoding is performed on `i_wdata_B`. `mem[i_addr_B]` is updated with the encoded data. This is a synchronous write.
+
+## 8. Pipelining and Latency
+
+*   **Read Latency**: The SRAM itself will be modeled as a combinational read for 1-cycle latency. This implies that the memory array access, ECC decoding, and data output occur within a single clock cycle. This is feasible for smaller SRAMs or by using dedicated memory macros with fast read paths.
+*   **Write Latency**: Writes will be synchronous, taking one clock cycle to complete after the address and data are stable.
+*   **AXI4-Lite**: The AXI4-Lite interface will be pipelined to handle requests efficiently, but the actual memory access will be combinational from the perspective of the AXI read/write channels.
+
+## 9. ECC Details (Hamming Code for SECDED)
+
+For a 32-bit data word, we need `m` parity bits such that `2^m >= n + m + 1`, where `n` is data bits. For `n=32`:
+
+*   `m=5`: `2^5 = 32 < 32 + 5 + 1 = 38` (Insufficient)
+*   `m=6`: `2^6 = 64 >= 32 + 6 + 1 = 39` (Sufficient for SED, but not SECDED)
+*   `m=7`: `2^7 = 128 >= 32 + 7 + 1 = 40` (Sufficient for SECDED)
+
+Therefore, 7 parity bits are required for SECDED. The specific Hamming code matrix will be implemented in the `ecc_encoder` and `ecc_decoder` modules.
+
+## 10. Module Breakdown
+
+1.  `sram_dual_port_axi_ecc`: Top-level module, instantiates sub-modules.
+2.  `axi4_lite_slave`: Handles AXI4-Lite protocol, translates to internal SRAM interface.
+3.  `sram_core`: Implements the dual-port memory array.
+4.  `ecc_encoder`: Generates 7 parity bits for 32-bit data.
+5.  `ecc_decoder`: Decodes 39-bit (32 data + 7 parity) word, corrects single errors, detects double errors, outputs corrected data and error flag.
+
+## 11. Design Optimizations
+
+*   **1-Cycle Read Latency**: Achieved by making memory access and ECC decoding combinational. This might lead to a longer critical path, which needs to be considered during timing analysis. For very high frequencies, a registered output for read data might be necessary, increasing latency to 2 cycles.
+*   **Area**: The ECC logic adds overhead. The memory array size is `MEM_DEPTH * (DATA_WIDTH + ECC_PARITY_BITS)`. This will be a significant portion of the area.
+*   **Power**: Clock gating could be applied to the AXI4-Lite FSM when in `IDLE` state if no requests are pending, but for a simple SRAM, this might be an over-optimization.
+
+## 12. Verification Strategy
+
+*   **UVM Testbench**: A comprehensive UVM testbench will be developed to verify the AXI4-Lite slave interface and the dual-port SRAM functionality.
+*   **Sequences**: Random and directed sequences will be used to generate AXI4-Lite read/write transactions, as well as direct Port A and Port B accesses.
+*   **Scoreboard**: A scoreboard will compare expected data with actual read data, including ECC error detection and correction.
+*   **Functional Coverage**: Coverage points will be defined for AXI4-Lite transactions, all memory addresses, write/read combinations, and ECC error scenarios (single-bit error injection, double-bit error injection).
+*   **Assertions (SVA)**: SystemVerilog Assertions will be used to check AXI4-Lite protocol compliance and internal design invariants (e.g., `AWREADY` only asserted when `AWVALID` is high).
+
+This architectural plan provides a solid foundation for the RTL design and verification of the dual-port SRAM with AXI4-Lite and SECDED ECC.
