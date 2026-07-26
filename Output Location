@@ -1,0 +1,7 @@
+OpenLane/designs/sram_64kb_1rw1r_ecc/runs/<TAG>/results/signoff/
+├── sram_64kb_1rw1r_ecc.gds.gz      <-- YOUR GDSII
+├── sram_64kb_1rw1r_ecc.v           <-- Netlist
+├── sram_64kb_1rw1r_ecc.spef        <-- Parasitics
+├── magic.drc.rpt                   <-- DRC Report (Must be 0 violations)
+├── magic.antenna.rpt               <-- Antenna Report
+└── lvs.rpt                         <-- LVS Report (Must match)
